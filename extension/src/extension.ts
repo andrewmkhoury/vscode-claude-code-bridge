@@ -1,10 +1,14 @@
 /**
- * Claude Code Workspace Bridge — VS Code Extension
+ * Claude Code Workspace Bridge — VS Code Extension v0.3.0
  *
  * On activation:
  *   1. Starts a local HTTP server exposing VS Code workspace intelligence.
  *   2. Syncs the bundled MCP server to a stable path (~/.claude-code-workspace/).
  *   3. Auto-configures ~/.claude.json so Claude Code picks it up immediately.
+ *
+ * Endpoints:
+ *   /health, /symbols, /document-symbols, /hover, /files, /active-editor,
+ *   /diagnostics, /definition, /references, /call-hierarchy, /git-status, /search
  */
 
 import * as http from 'http';
@@ -14,8 +18,10 @@ import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
+const VERSION = '0.3.0';
 const EXT_NAME = 'Claude Code Workspace';
 const MCP_KEY = 'vscode-workspace';
 /** Stable directory written outside the extension so the path survives updates. */
@@ -113,8 +119,21 @@ async function unconfigureClaude(): Promise<void> {
 // ─── HTTP bridge ──────────────────────────────────────────────────────────────
 
 function jsonResponse(res: http.ServerResponse, data: unknown, status = 200): void {
-  res.writeHead(status, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '127.0.0.1' });
+  res.writeHead(status, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(data));
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, msg: string): Promise<T> {
+  return Promise.race([promise, new Promise<T>((_, rej) => setTimeout(() => rej(new Error(msg)), ms))]);
+}
+
+function flattenDocSymbols(symbols: vscode.DocumentSymbol[], depth = 0): object[] {
+  const rows: object[] = [];
+  for (const s of symbols) {
+    rows.push({ name: s.name, kind: vscode.SymbolKind[s.kind] ?? String(s.kind), detail: s.detail || '', startLine: s.range.start.line + 1, endLine: s.range.end.line + 1, depth });
+    if (s.children?.length) rows.push(...flattenDocSymbols(s.children, depth + 1));
+  }
+  return rows;
 }
 
 async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
@@ -123,7 +142,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
   if (url.pathname === '/health') {
     jsonResponse(res, {
       ok: true,
-      version: '0.1.0',
+      version: VERSION,
       workspaceFolders: vscode.workspace.workspaceFolders?.map(f => f.uri.fsPath) ?? [],
       activeFile: vscode.window.activeTextEditor?.document.uri.fsPath ?? null,
     });
@@ -132,17 +151,50 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 
   if (url.pathname === '/symbols') {
     const q = url.searchParams.get('q') ?? '';
+    const limit = parseInt(url.searchParams.get('limit') ?? String(cfg<number>('maxSymbols') || 100), 10);
     try {
-      const raw = await vscode.commands.executeCommand<vscode.SymbolInformation[]>('vscode.executeWorkspaceSymbolProvider', q);
-      const limit = cfg<number>('maxSymbols') || 100;
+      const raw = await withTimeout(
+        vscode.commands.executeCommand<vscode.SymbolInformation[]>('vscode.executeWorkspaceSymbolProvider', q),
+        10000, 'Symbol search timed out — LSP may still be indexing. Try again in a moment.'
+      );
       const symbols = (raw ?? []).slice(0, limit).map(s => ({
-        name: s.name,
-        kind: vscode.SymbolKind[s.kind] ?? String(s.kind),
-        container: s.containerName || '',
-        file: s.location.uri.fsPath,
-        line: s.location.range.start.line + 1,
+        name: s.name, kind: vscode.SymbolKind[s.kind] ?? String(s.kind),
+        container: s.containerName || '', file: s.location.uri.fsPath, line: s.location.range.start.line + 1,
       }));
       jsonResponse(res, symbols);
+    } catch (e) { jsonResponse(res, { error: String(e) }, 500); }
+    return;
+  }
+
+  if (url.pathname === '/document-symbols') {
+    const file = url.searchParams.get('file');
+    if (!file) { jsonResponse(res, { error: 'file param required' }, 400); return; }
+    try {
+      const raw = await withTimeout(
+        vscode.commands.executeCommand<vscode.DocumentSymbol[]>('vscode.executeDocumentSymbolProvider', vscode.Uri.file(file)),
+        8000, 'Document symbol query timed out'
+      );
+      jsonResponse(res, flattenDocSymbols(raw ?? []));
+    } catch (e) { jsonResponse(res, { error: String(e) }, 500); }
+    return;
+  }
+
+  if (url.pathname === '/hover') {
+    const file = url.searchParams.get('file');
+    if (!file) { jsonResponse(res, { error: 'file param required' }, 400); return; }
+    const line = Math.max(0, parseInt(url.searchParams.get('line') ?? '1', 10) - 1);
+    const col  = Math.max(0, parseInt(url.searchParams.get('col')  ?? '1', 10) - 1);
+    try {
+      const raw = await withTimeout(
+        vscode.commands.executeCommand<vscode.Hover[]>('vscode.executeHoverProvider', vscode.Uri.file(file), new vscode.Position(line, col)),
+        6000, 'Hover timed out'
+      );
+      const contents = (raw ?? []).flatMap(h =>
+        (Array.isArray(h.contents) ? h.contents : [h.contents]).map(c =>
+          typeof c === 'string' ? c : (c as vscode.MarkdownString).value ?? ''
+        )
+      ).filter(Boolean);
+      jsonResponse(res, { contents });
     } catch (e) { jsonResponse(res, { error: String(e) }, 500); }
     return;
   }
@@ -150,7 +202,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
   if (url.pathname === '/files') {
     const pattern = url.searchParams.get('pattern') ?? '**/*';
     const exclude = url.searchParams.get('exclude') ?? '**/node_modules/**';
-    const limit = cfg<number>('maxFiles') || 200;
+    const limit = parseInt(url.searchParams.get('limit') ?? String(cfg<number>('maxFiles') || 200), 10);
     try {
       const uris = await vscode.workspace.findFiles(pattern, exclude, limit);
       jsonResponse(res, uris.map(u => u.fsPath));
@@ -184,21 +236,22 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
   }
 
   if (url.pathname === '/diagnostics') {
-    const file = url.searchParams.get('file');
+    const file     = url.searchParams.get('file');
+    const minLevel = (url.searchParams.get('severity') ?? 'all').toLowerCase();
+    const sevMap: Record<string, number> = { error: 0, warning: 1, information: 2, hint: 3, all: 3 };
+    const maxSev   = sevMap[minLevel] ?? 3;
     try {
-      type DiagRow = { file: string; severity: string; message: string; source: string; code: string; startLine: number; startCol: number; endLine: number; endCol: number };
-      const toRow = (uri: vscode.Uri, d: vscode.Diagnostic): DiagRow => ({
-        file: uri.fsPath,
+      type DiagRow = { file: string; severity: string; message: string; source: string; code: string; startLine: number; startCol: number };
+      const toRow = (filePath: string, d: vscode.Diagnostic): DiagRow => ({
+        file: filePath,
         severity: (['Error', 'Warning', 'Information', 'Hint'] as const)[d.severity] ?? String(d.severity),
-        message: d.message,
-        source: d.source ?? '',
+        message: d.message, source: d.source ?? '',
         code: d.code != null ? (typeof d.code === 'object' ? String(d.code.value) : String(d.code)) : '',
         startLine: d.range.start.line + 1, startCol: d.range.start.character + 1,
-        endLine: d.range.end.line + 1, endCol: d.range.end.character + 1,
       });
       const rows = file
-        ? vscode.languages.getDiagnostics(vscode.Uri.file(file)).map(d => toRow(vscode.Uri.file(file), d))
-        : vscode.languages.getDiagnostics().flatMap(([uri, ds]) => ds.map(d => toRow(uri, d)));
+        ? vscode.languages.getDiagnostics(vscode.Uri.file(file)).filter(d => d.severity <= maxSev).map(d => toRow(file, d))
+        : vscode.languages.getDiagnostics().flatMap(([uri, ds]) => ds.filter(d => d.severity <= maxSev).map(d => toRow(uri.fsPath, d)));
       jsonResponse(res, rows);
     } catch (e) { jsonResponse(res, { error: String(e) }, 500); }
     return;
@@ -208,14 +261,15 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     const file = url.searchParams.get('file');
     if (!file) { jsonResponse(res, { error: 'file param required' }, 400); return; }
     const line = Math.max(0, parseInt(url.searchParams.get('line') ?? '1', 10) - 1);
-    const col = Math.max(0, parseInt(url.searchParams.get('col') ?? '1', 10) - 1);
+    const col  = Math.max(0, parseInt(url.searchParams.get('col')  ?? '1', 10) - 1);
     try {
-      const raw = await vscode.commands.executeCommand<(vscode.Location | vscode.LocationLink)[]>(
-        'vscode.executeDefinitionProvider', vscode.Uri.file(file), new vscode.Position(line, col)
+      const raw = await withTimeout(
+        vscode.commands.executeCommand<(vscode.Location | vscode.LocationLink)[]>('vscode.executeDefinitionProvider', vscode.Uri.file(file), new vscode.Position(line, col)),
+        8000, 'Definition query timed out'
       );
       const locs = (raw ?? []).map(l => {
         const { uri, range } = 'targetUri' in l ? { uri: l.targetUri, range: l.targetRange } : l;
-        return { file: uri.fsPath, startLine: range.start.line + 1, startCol: range.start.character + 1, endLine: range.end.line + 1, endCol: range.end.character + 1 };
+        return { file: uri.fsPath, startLine: range.start.line + 1, startCol: range.start.character + 1 };
       });
       jsonResponse(res, locs);
     } catch (e) { jsonResponse(res, { error: String(e) }, 500); }
@@ -223,14 +277,15 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
   }
 
   if (url.pathname === '/references') {
-    const file = url.searchParams.get('file');
+    const file  = url.searchParams.get('file');
     if (!file) { jsonResponse(res, { error: 'file param required' }, 400); return; }
-    const line = Math.max(0, parseInt(url.searchParams.get('line') ?? '1', 10) - 1);
-    const col = Math.max(0, parseInt(url.searchParams.get('col') ?? '1', 10) - 1);
-    const limit = cfg<number>('maxReferences') || 200;
+    const line  = Math.max(0, parseInt(url.searchParams.get('line') ?? '1', 10) - 1);
+    const col   = Math.max(0, parseInt(url.searchParams.get('col')  ?? '1', 10) - 1);
+    const limit = parseInt(url.searchParams.get('limit') ?? String(cfg<number>('maxReferences') || 200), 10);
     try {
-      const raw = await vscode.commands.executeCommand<vscode.Location[]>(
-        'vscode.executeReferenceProvider', vscode.Uri.file(file), new vscode.Position(line, col)
+      const raw = await withTimeout(
+        vscode.commands.executeCommand<vscode.Location[]>('vscode.executeReferenceProvider', vscode.Uri.file(file), new vscode.Position(line, col)),
+        8000, 'Reference query timed out'
       );
       const locs = (raw ?? []).slice(0, limit).map(l => ({ file: l.uri.fsPath, line: l.range.start.line + 1, col: l.range.start.character + 1 }));
       jsonResponse(res, locs);
@@ -238,21 +293,93 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     return;
   }
 
-  if (url.pathname === '/search') {
-    const q = url.searchParams.get('q');
-    if (!q) { jsonResponse(res, { error: 'q param required' }, 400); return; }
-    const maxResults = Math.min(parseInt(url.searchParams.get('maxResults') ?? '100', 10), cfg<number>('maxSearchResults') || 100);
+  if (url.pathname === '/call-hierarchy') {
+    const file = url.searchParams.get('file');
+    if (!file) { jsonResponse(res, { error: 'file param required' }, 400); return; }
+    const line      = Math.max(0, parseInt(url.searchParams.get('line') ?? '1', 10) - 1);
+    const col       = Math.max(0, parseInt(url.searchParams.get('col')  ?? '1', 10) - 1);
+    const direction = url.searchParams.get('direction') ?? 'incoming';
+    const limit     = parseInt(url.searchParams.get('limit') ?? '50', 10);
     try {
-      const results: { file: string; line: number; col: number; preview: string }[] = [];
-      type TextMatch = { uri: vscode.Uri; ranges: vscode.Range[]; preview: { text: string } };
-      const findTextInFiles = (vscode.workspace as unknown as {
-        findTextInFiles(query: object, options: object, callback: (m: TextMatch) => void): Thenable<void>;
-      }).findTextInFiles;
-      await findTextInFiles(
-        { pattern: q, isRegExp: url.searchParams.get('regex') === '1' },
-        { include: url.searchParams.get('include') ?? undefined, exclude: url.searchParams.get('exclude') ?? undefined, maxResults },
-        (m: TextMatch) => results.push({ file: m.uri.fsPath, line: (m.ranges[0]?.start.line ?? 0) + 1, col: (m.ranges[0]?.start.character ?? 0) + 1, preview: m.preview.text.trim() })
+      const items = await withTimeout(
+        vscode.commands.executeCommand<vscode.CallHierarchyItem[]>('vscode.prepareCallHierarchy', vscode.Uri.file(file), new vscode.Position(line, col)),
+        8000, 'Call hierarchy prepare timed out'
       );
+      if (!items?.length) { jsonResponse(res, []); return; }
+      const cmd   = direction === 'outgoing' ? 'vscode.provideOutgoingCalls' : 'vscode.provideIncomingCalls';
+      const calls = await withTimeout(
+        vscode.commands.executeCommand<(vscode.CallHierarchyIncomingCall | vscode.CallHierarchyOutgoingCall)[]>(cmd, items[0]),
+        8000, 'Call hierarchy query timed out'
+      );
+      const rows = (calls ?? []).slice(0, limit).map(c => {
+        const sym = direction === 'outgoing' ? (c as vscode.CallHierarchyOutgoingCall).to : (c as vscode.CallHierarchyIncomingCall).from;
+        return { name: sym.name, kind: vscode.SymbolKind[sym.kind] ?? String(sym.kind), file: sym.uri.fsPath, line: sym.selectionRange.start.line + 1, col: sym.selectionRange.start.character + 1, callSites: c.fromRanges.length };
+      });
+      jsonResponse(res, rows);
+    } catch (e) { jsonResponse(res, { error: String(e) }, 500); }
+    return;
+  }
+
+  if (url.pathname === '/git-status') {
+    try {
+      const gitExt = vscode.extensions.getExtension('vscode.git');
+      if (!gitExt) { jsonResponse(res, { error: 'Git extension not found' }, 404); return; }
+      if (!gitExt.isActive) await gitExt.activate();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const api = (gitExt.exports as any).getAPI(1);
+      const statusMap: Record<number, string> = { 0:'INDEX_MODIFIED', 1:'INDEX_ADDED', 2:'INDEX_DELETED', 3:'INDEX_RENAMED', 4:'INDEX_COPIED', 5:'MODIFIED', 6:'DELETED', 7:'UNTRACKED', 8:'IGNORED', 9:'INTENT_TO_ADD' };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const mapChange = (c: any) => ({ path: c.uri.fsPath, status: statusMap[c.status] ?? String(c.status) });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const repos = api.repositories.map((repo: any) => {
+        const head = repo.state.HEAD;
+        return { root: repo.rootUri.fsPath, branch: head?.name ?? null, commit: head?.commit?.slice(0, 8) ?? null, ahead: head?.ahead ?? 0, behind: head?.behind ?? 0, staged: repo.state.indexChanges.map(mapChange), unstaged: repo.state.workingTreeChanges.map(mapChange), untracked: (repo.state.untrackedChanges ?? []).map(mapChange) };
+      });
+      jsonResponse(res, repos);
+    } catch (e) { jsonResponse(res, { error: String(e) }, 500); }
+    return;
+  }
+
+  if (url.pathname === '/search') {
+    const q          = url.searchParams.get('q');
+    if (!q) { jsonResponse(res, { error: 'q param required' }, 400); return; }
+    const include    = url.searchParams.get('include');
+    const exclude    = url.searchParams.get('exclude');
+    const maxResults = Math.min(parseInt(url.searchParams.get('maxResults') ?? '100', 10), cfg<number>('maxSearchResults') || 500);
+    const isRegex    = url.searchParams.get('regex') === '1';
+
+    const folders = vscode.workspace.workspaceFolders?.map(f => f.uri.fsPath) ?? [];
+    if (!folders.length) { jsonResponse(res, []); return; }
+
+    const appRoot   = vscode.env.appRoot;
+    const bundledRg = path.join(appRoot, 'node_modules', '@vscode', 'ripgrep', 'bin', 'rg');
+    const rgBin     = fs.existsSync(bundledRg) ? bundledRg : 'rg';
+
+    const args = ['--json', '-m', String(maxResults), '--max-filesize', '1M'];
+    if (!isRegex) args.push('--fixed-strings');
+    if (include) args.push('--glob', include);
+    if (exclude) { for (const g of exclude.split(',')) args.push('--glob', `!${g.trim()}`); }
+    args.push('--', q, ...folders);
+
+    try {
+      const results = await new Promise<{ file: string; line: number; col: number; preview: string }[]>((resolve, reject) => {
+        cp.execFile(rgBin as string, args, { maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => {
+          if (err && (err as NodeJS.ErrnoException).code !== 1) { reject(err); return; }
+          const rows: { file: string; line: number; col: number; preview: string }[] = [];
+          for (const line of stdout.split('\n')) {
+            if (!line.trim()) continue;
+            try {
+              const msg = JSON.parse(line) as Record<string, unknown>;
+              if (msg['type'] === 'match') {
+                const data = msg['data'] as Record<string, unknown>;
+                rows.push({ file: (data['path'] as Record<string, string>)['text'], line: data['line_number'] as number, col: ((data['submatches'] as Record<string, number>[])[0]?.['start'] ?? 0) + 1, preview: (data['lines'] as Record<string, string>)['text'].trimEnd() });
+                if (rows.length >= maxResults) break;
+              }
+            } catch { /* skip */ }
+          }
+          resolve(rows);
+        });
+      });
       jsonResponse(res, results);
     } catch (e) { jsonResponse(res, { error: String(e) }, 500); }
     return;
