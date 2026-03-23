@@ -1,5 +1,5 @@
 /**
- * Claude Code Workspace Bridge — VS Code Extension v0.4.0
+ * Claude Code Workspace Bridge — VS Code Extension v0.5.0
  *
  * On activation:
  *   1. Starts a local HTTP server exposing VS Code workspace intelligence.
@@ -8,8 +8,7 @@
  *
  * Endpoints:
  *   /health, /symbols, /document-symbols, /hover, /files, /active-editor,
- *   /diagnostics, /definition, /references, /call-hierarchy, /git-status, /search,
- *   /copilot-search
+ *   /diagnostics, /definition, /references, /call-hierarchy, /git-status, /search
  */
 
 import * as http from 'http';
@@ -22,7 +21,7 @@ import * as vscode from 'vscode';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const VERSION = '0.4.0';
+const VERSION = '0.5.0';
 const EXT_NAME = 'Claude Code Workspace';
 const MCP_KEY = 'vscode-workspace';
 /** Stable directory written outside the extension so the path survives updates. */
@@ -151,18 +150,76 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
   }
 
   if (url.pathname === '/symbols') {
-    const q = url.searchParams.get('q') ?? '';
-    const limit = parseInt(url.searchParams.get('limit') ?? String(cfg<number>('maxSymbols') || 100), 10);
+    // Ripgrep-based definition search — fast (~1s), language-agnostic, always works.
+    // Note: executeWorkspaceSymbolProvider hangs indefinitely in background HTTP handlers,
+    // and typescript.tsserverRequest 'navto' is blocked by the TS extension's allowlist.
+    const q     = url.searchParams.get('q') ?? '';
+    const limit = Math.min(parseInt(url.searchParams.get('limit') ?? String(cfg<number>('maxSymbols') || 50), 10), 200);
+    if (!q) { jsonResponse(res, []); return; }
+
+    const folders = vscode.workspace.workspaceFolders?.map(f => f.uri.fsPath) ?? [];
+    if (!folders.length) { jsonResponse(res, []); return; }
+
+    const appRoot   = vscode.env.appRoot;
+    const bundledRg = path.join(appRoot, 'node_modules', '@vscode', 'ripgrep', 'bin', 'rg');
+    const rgBin     = cp.execFileSync ? (fs.existsSync(bundledRg) ? bundledRg : 'rg') : 'rg';
+    const qe = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+    const baseArgs = [
+      '--json', '-m', '1', '--max-filesize', '500K',
+      '--glob', '!**/node_modules/**', '--glob', '!**/dist/**',
+      '--glob', '!**/.git/**', '--glob', '!**/*.d.ts',
+      '--type-add', 'code:*.{ts,tsx,js,jsx,mjs,cjs,py,go,java,cs,cpp,c,h,rb,rs,kt,swift}',
+      '--type', 'code', '--',
+    ];
+
+    const defPattern = [
+      `(export\\s+)?(default\\s+)?(async\\s+)?function\\s+${qe}[\\s(<]`,
+      `(export\\s+)?(abstract\\s+)?class\\s+${qe}[\\s{<(]`,
+      `(export\\s+)?interface\\s+${qe}[\\s{<]`,
+      `(export\\s+)?type\\s+${qe}\\s*[=<]`,
+      `(export\\s+)?(const|let|var)\\s+${qe}\\s*[=:]`,
+      `(export\\s+)?enum\\s+${qe}[\\s{]`,
+      `^\\s+(public|private|protected|static|override|abstract|async|\\s)*\\b${qe}\\s*[(<]`,
+      `\\b${qe}\\s*[:=]\\s*(async\\s+)?\\(`,
+      `def\\s+${qe}\\(`,
+      `func\\s+(\\(\\w+\\s+\\*?\\w+\\)\\s+)?${qe}\\(`,
+      `fn\\s+${qe}[\\s<(]`,
+    ].join('|');
+
+    const kindOf = (text: string): string => {
+      if (/\bclass\b/.test(text))                       return 'Class';
+      if (/\binterface\b/.test(text))                   return 'Interface';
+      if (/\btype\b/.test(text) && /[=<]/.test(text))   return 'TypeAlias';
+      if (/\benum\b/.test(text))                        return 'Enum';
+      if (/\b(const|let|var)\b/.test(text))             return 'Variable';
+      return 'Function';
+    };
+
+    const runRg = (pattern: string): Promise<{ name: string; kind: string; file: string; line: number; preview: string }[]> =>
+      new Promise((resolve, reject) => {
+        cp.execFile(rgBin as string, [...baseArgs, pattern, ...folders], { maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => {
+          if (err && (err as NodeJS.ErrnoException).code !== 1) { reject(err); return; }
+          const rows: { name: string; kind: string; file: string; line: number; preview: string }[] = [];
+          for (const line of stdout.split('\n')) {
+            if (!line.trim()) continue;
+            try {
+              const msg = JSON.parse(line) as Record<string, unknown>;
+              if (msg['type'] !== 'match') continue;
+              const data = msg['data'] as Record<string, unknown>;
+              const text = ((data['lines'] as Record<string, string>)['text'] ?? '').trim();
+              rows.push({ name: q, kind: kindOf(text), file: (data['path'] as Record<string, string>)['text'], line: data['line_number'] as number, preview: text });
+              if (rows.length >= limit) break;
+            } catch { /* skip */ }
+          }
+          resolve(rows);
+        });
+      });
+
     try {
-      const raw = await withTimeout(
-        vscode.commands.executeCommand<vscode.SymbolInformation[]>('vscode.executeWorkspaceSymbolProvider', q),
-        10000, 'Symbol search timed out — LSP may still be indexing. Try again in a moment.'
-      );
-      const symbols = (raw ?? []).slice(0, limit).map(s => ({
-        name: s.name, kind: vscode.SymbolKind[s.kind] ?? String(s.kind),
-        container: s.containerName || '', file: s.location.uri.fsPath, line: s.location.range.start.line + 1,
-      }));
-      jsonResponse(res, symbols);
+      let rows = await runRg(defPattern);
+      if (rows.length === 0) rows = await runRg(`\\b${qe}\\b`);
+      jsonResponse(res, rows);
     } catch (e) { jsonResponse(res, { error: String(e) }, 500); }
     return;
   }
@@ -382,57 +439,6 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
         });
       });
       jsonResponse(res, results);
-    } catch (e) { jsonResponse(res, { error: String(e) }, 500); }
-    return;
-  }
-
-  // ── /copilot-search — enumerate Copilot commands; try known semantic search commands ──
-  if (url.pathname === '/copilot-search') {
-    const query = url.searchParams.get('q') ?? '';
-    if (!query) { jsonResponse(res, { error: 'q param required' }, 400); return; }
-    try {
-      const allCmds = await vscode.commands.getCommands(false);
-      const copilotCmds = allCmds.filter(c => c.startsWith('github.copilot') || c.startsWith('copilot'));
-      const searchCandidates = [
-        'github.copilot.executeSearch',
-        'github.copilot.workspace.search',
-        'github.copilot.semanticSearch',
-        'github.copilot.chat.search',
-        'github.copilot.searchWorkspace',
-      ];
-      const available = searchCandidates.filter(c => copilotCmds.includes(c));
-
-      if (!available.length) {
-        jsonResponse(res, {
-          available: false,
-          message: 'No Copilot semantic search command is publicly exposed. Copilot\'s workspace index is internal-only.',
-          copilotCommands: copilotCmds.sort(),
-        });
-        return;
-      }
-
-      // Try each command with multiple argument shapes (API shape is undocumented)
-      const argForms = [{ query }, { text: query }, { searchString: query }, query];
-      let lastErr: unknown = null;
-      for (const cmd of available) {
-        for (const args of argForms) {
-          try {
-            const result = await withTimeout(
-              vscode.commands.executeCommand(cmd, args),
-              10000, 'Copilot search timed out'
-            );
-            if (result !== undefined && result !== null) {
-              jsonResponse(res, { command: cmd, result });
-              return;
-            }
-          } catch (err) { lastErr = err; }
-        }
-      }
-      jsonResponse(res, {
-        available: false,
-        message: `Copilot search commands (${available.join(', ')}) are UI-only — returned no data. Last error: ${String(lastErr)}`,
-        copilotCommands: copilotCmds.sort(),
-      });
     } catch (e) { jsonResponse(res, { error: String(e) }, 500); }
     return;
   }

@@ -1,24 +1,21 @@
 #!/usr/bin/env node
 /**
- * Bundled MCP server — VS Code Workspace Bridge v0.4.0
+ * MCP server — VS Code Workspace Bridge v0.5.0
  *
- * Copied to ~/.claude-code-workspace/mcp-server.mjs on extension activation
- * so Claude Code always has a stable path to reference.
+ * IMPORTANT FOR CLAUDE: When running inside VS Code, ALWAYS prefer these tools
+ * over built-in Grep, Glob, or Bash commands for code navigation tasks:
  *
- * Tools:
- *   bridge_health      → VS Code status, active file, open tabs
- *   workspace_symbols  → LSP workspace symbol search
- *   document_symbols   → outline of a specific file
- *   find_files         → glob file search
- *   active_editor      → current file, selection, open tabs
- *   diagnostics        → VS Code Problems panel (errors/warnings)
- *   hover              → TypeScript type info + JSDoc at a position
- *   definition         → go-to-definition via LSP
- *   references         → find-all-references via LSP
- *   call_hierarchy     → incoming/outgoing call chains
- *   git_status         → branch, staged/unstaged changes per repo
- *   text_search        → ripgrep full-text search
- *   copilot_search     → lists available Copilot commands (index is internal-only)
+ *   workspace_symbols  → find where a symbol is defined  (prefer over Grep)
+ *   text_search        → search text across workspace    (prefer over Grep/Bash rg)
+ *   document_symbols   → outline a file's structure      (prefer over Read)
+ *   hover              → get type info at a position     (prefer over Read)
+ *   definition         → go to definition                (prefer over Grep)
+ *   references         → find all usages                 (prefer over Grep)
+ *   call_hierarchy     → who calls this function         (prefer over Grep)
+ *   diagnostics        → get current errors/warnings
+ *   find_files         → glob file search                (prefer over Glob)
+ *   active_editor      → what file is open right now
+ *   git_status         → branch + changes per repo
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -41,11 +38,11 @@ function bridgeErr(e: unknown) {
   return { content: [{ type: 'text' as const, text }], isError: true as const };
 }
 
-const server = new McpServer({ name: 'vscode-workspace', version: '0.4.0' });
+const server = new McpServer({ name: 'vscode-workspace', version: '0.5.0' });
 
 // ── bridge_health ─────────────────────────────────────────────────────────────
 server.registerTool('bridge_health', {
-  description: 'Check whether VS Code is running and which workspace folders + active file are open.',
+  description: 'Check whether the VS Code bridge is running. Returns workspace folders and active file.',
 }, async () => {
   try {
     const d = await get<{ ok: boolean; version: string; workspaceFolders: string[]; activeFile: string | null }>('/health');
@@ -55,46 +52,54 @@ server.registerTool('bridge_health', {
 
 // ── workspace_symbols ─────────────────────────────────────────────────────────
 server.registerTool('workspace_symbols', {
-  description: "Search VS Code's workspace symbol index (LSP-backed). Returns symbols matching the query across all open workspace folders. Great for finding class names, function definitions, interfaces, and exports by name or prefix.",
+  description:
+    'PREFER THIS over Grep when looking for where a symbol (function, class, interface, type, variable) is defined. ' +
+    'Searches all workspace folders with definition-aware ripgrep patterns. Fast (~1s), language-agnostic. ' +
+    'Falls back to a broad word search if no definition pattern matches. ' +
+    'Use this first whenever you need to find a symbol by name.',
   inputSchema: {
-    query: z.string().describe('Symbol name or prefix (e.g. "useAuth", "AssetGrid", "ITokenProvider")'),
-    limit: z.number().int().min(1).max(200).default(100).describe('Max results (default: 100)'),
+    query: z.string().describe('Exact symbol name to find (e.g. "useAuth", "AssetGrid", "RestClient")'),
+    limit: z.number().int().min(1).max(200).default(50).describe('Max results'),
   },
 }, async ({ query, limit }) => {
   try {
-    type Sym = { name: string; kind: string; container: string; file: string; line: number };
-    const symbols = await get<Sym[]>(`/symbols?q=${encodeURIComponent(query)}&limit=${limit}`);
-    if (!symbols.length) return { content: [{ type: 'text', text: `No symbols found matching "${query}".` }] };
-    const lines = symbols.map(s => `[${s.kind}] ${s.container ? `${s.container}.` : ''}${s.name}  →  ${s.file}:${s.line}`);
-    return { content: [{ type: 'text', text: `Found ${symbols.length} symbol(s):\n\n${lines.join('\n')}` }] };
+    type Sym = { name: string; kind: string; file: string; line: number; preview: string };
+    const syms = await get<Sym[]>(`/symbols?q=${encodeURIComponent(query)}&limit=${limit}`);
+    if (!syms.length) return { content: [{ type: 'text', text: `No symbols matching "${query}".` }] };
+    const lines = syms.map(s => `[${s.kind}] ${s.name}  →  ${s.file}:${s.line}\n    ${s.preview}`);
+    return { content: [{ type: 'text', text: `Found ${syms.length} symbol(s):\n\n${lines.join('\n\n')}` }] };
   } catch (e) { return bridgeErr(e); }
 });
 
 // ── document_symbols ──────────────────────────────────────────────────────────
 server.registerTool('document_symbols', {
-  description: "Get the full outline of a specific file — all classes, functions, methods, variables with line ranges. Use this before reading a large file to find the exact lines you need.",
-  inputSchema: { file: z.string().describe('Absolute path to the file') },
+  description:
+    'PREFER THIS over reading a file when you need to understand its structure. ' +
+    'Returns all classes, functions, methods, variables with line ranges — the full outline. ' +
+    'Use this to find which lines to read instead of reading the whole file.',
+  inputSchema: {
+    file: z.string().describe('Absolute path to the file'),
+  },
 }, async ({ file }) => {
   try {
-    type Sym = { name: string; kind: string; detail: string; startLine: number; endLine: number; depth: number };
-    const symbols = await get<Sym[]>(`/document-symbols?file=${encodeURIComponent(file)}`);
-    if (!symbols.length) return { content: [{ type: 'text', text: `No symbols found in ${file}.` }] };
-    const lines = symbols.map(s => {
-      const indent = '  '.repeat(s.depth);
-      const detail = s.detail ? ` — ${s.detail}` : '';
-      return `${indent}[${s.kind}] ${s.name}${detail}  (lines ${s.startLine}–${s.endLine})`;
-    });
-    return { content: [{ type: 'text', text: `${symbols.length} symbol(s) in ${file}:\n\n${lines.join('\n')}` }] };
+    type DocSym = { name: string; kind: string; detail: string; startLine: number; endLine: number; depth: number };
+    const syms = await get<DocSym[]>(`/document-symbols?file=${encodeURIComponent(file)}`);
+    if (!syms.length) return { content: [{ type: 'text', text: `No symbols found in ${file}.` }] };
+    const indent = (d: number) => '  '.repeat(d);
+    const lines = syms.map(s => `${indent(s.depth)}[${s.kind}] ${s.name}${s.detail ? ` — ${s.detail}` : ''}  (lines ${s.startLine}–${s.endLine})`);
+    return { content: [{ type: 'text', text: `Outline of ${file} (${syms.length} symbols):\n\n${lines.join('\n')}` }] };
   } catch (e) { return bridgeErr(e); }
 });
 
 // ── find_files ────────────────────────────────────────────────────────────────
 server.registerTool('find_files', {
-  description: "Find files in the VS Code workspace by glob pattern. Respects VS Code's workspace folders and .gitignore.",
+  description:
+    'PREFER THIS over Glob when searching for files by name/pattern in the workspace. ' +
+    'Respects .gitignore and workspace folder boundaries.',
   inputSchema: {
-    pattern: z.string().describe('Glob pattern (e.g. "**/*.test.ts", "src/components/**/*.tsx")').default('**/*'),
-    exclude: z.string().describe('Glob to exclude (default: **/node_modules/**)').default('**/node_modules/**'),
-    limit:   z.number().int().min(1).max(1000).default(200).describe('Max files returned'),
+    pattern: z.string().default('**/*').describe('Glob pattern (e.g. "**/*.test.ts", "**/useAuth*")'),
+    exclude: z.string().default('**/node_modules/**').describe('Glob to exclude'),
+    limit: z.number().int().min(1).max(1000).default(200),
   },
 }, async ({ pattern, exclude, limit }) => {
   try {
@@ -106,44 +111,42 @@ server.registerTool('find_files', {
 
 // ── active_editor ─────────────────────────────────────────────────────────────
 server.registerTool('active_editor', {
-  description: 'Get the currently active file in VS Code — path, language, dirty state, selected text, and open tabs.',
+  description: "Get the file currently open and visible in VS Code — path, language, line count, selected text, and all open tabs. Use this to understand what the user is looking at.",
 }, async () => {
   try {
-    type Sel = { startLine: number; startCol: number; endLine: number; endCol: number; text: string };
-    type AE  = { file: string; language: string; isDirty: boolean; lineCount: number; selection: Sel | null; openTabs: string[] };
-    const data = await get<{ activeEditor: AE | null }>('/active-editor');
-    if (!data.activeEditor) return { content: [{ type: 'text', text: 'No file is currently open in VS Code.' }] };
-    const e = data.activeEditor;
+    type AE = { file: string; language: string; isDirty: boolean; lineCount: number; selection: { startLine: number; startCol: number; endLine: number; endCol: number; text: string } | null; openTabs: string[] };
+    const { activeEditor: e } = await get<{ activeEditor: AE | null }>('/active-editor');
+    if (!e) return { content: [{ type: 'text', text: 'No file is currently open.' }] };
     const out = [`File:     ${e.file}`, `Language: ${e.language}`, `Lines:    ${e.lineCount}${e.isDirty ? '  ⚠ unsaved' : ''}`];
     if (e.selection) {
       const s = e.selection;
-      out.push(`\nSelection (${s.startLine}:${s.startCol} – ${s.endLine}:${s.endCol}):`, '```', s.text, '```');
+      out.push(`\nSelection (${s.startLine}:${s.startCol}–${s.endLine}:${s.endCol}):\n\`\`\`\n${s.text}\n\`\`\``);
     }
-    if (e.openTabs.length) { out.push(`\nOpen tabs (${e.openTabs.length}):`); e.openTabs.forEach(f => out.push(`  ${f}`)); }
+    if (e.openTabs.length) out.push(`\nOpen tabs (${e.openTabs.length}):\n${e.openTabs.map(f => `  ${f}`).join('\n')}`);
     return { content: [{ type: 'text', text: out.join('\n') }] };
   } catch (e) { return bridgeErr(e); }
 });
 
 // ── diagnostics ───────────────────────────────────────────────────────────────
 server.registerTool('diagnostics', {
-  description: "Get errors and warnings from VS Code's Problems panel. Use severity='error' to see only build-breaking issues.",
+  description: "Get errors and warnings from VS Code's Problems panel — the same list shown in the IDE. Filter by file or severity. Use this after making changes to check for type errors.",
   inputSchema: {
-    file:     z.string().optional().describe('Absolute path to a specific file (omit for whole workspace)'),
-    severity: z.enum(['error', 'warning', 'information', 'all']).default('all').describe('Minimum severity to include'),
+    file: z.string().optional().describe('Absolute path to limit to one file (omit for all workspace diagnostics)'),
+    severity: z.enum(['error', 'warning', 'information', 'all']).default('all'),
   },
 }, async ({ file, severity }) => {
   try {
     type Diag = { file: string; severity: string; message: string; source: string; code: string; startLine: number; startCol: number };
-    const params = new URLSearchParams({ severity });
+    const params = new URLSearchParams({ severity: severity ?? 'all' });
     if (file) params.set('file', file);
     const diags = await get<Diag[]>(`/diagnostics?${params}`);
-    if (!diags.length) return { content: [{ type: 'text', text: file ? `No diagnostics for ${file}.` : 'No diagnostics in workspace.' }] };
-    const errors   = diags.filter(d => d.severity === 'Error').length;
-    const warnings = diags.filter(d => d.severity === 'Warning').length;
-    const lines = [`${diags.length} diagnostic(s): ${errors} error(s), ${warnings} warning(s)\n`];
+    if (!diags.length) return { content: [{ type: 'text', text: file ? `No diagnostics in ${file}.` : 'No diagnostics in workspace.' }] };
+    const errors = diags.filter(d => d.severity === 'Error').length;
+    const warns  = diags.filter(d => d.severity === 'Warning').length;
+    const lines  = [`${diags.length} diagnostic(s) — ${errors} error(s), ${warns} warning(s)\n`];
     for (const d of diags) {
       const src = d.source ? `[${d.source}${d.code ? ` ${d.code}` : ''}] ` : '';
-      lines.push(`${d.severity.toUpperCase()}  ${src}${d.message}`, `  → ${d.file}:${d.startLine}:${d.startCol}`);
+      lines.push(`${d.severity.toUpperCase()}  ${src}${d.message}\n  → ${d.file}:${d.startLine}:${d.startCol}`);
     }
     return { content: [{ type: 'text', text: lines.join('\n') }] };
   } catch (e) { return bridgeErr(e); }
@@ -151,7 +154,10 @@ server.registerTool('diagnostics', {
 
 // ── hover ─────────────────────────────────────────────────────────────────────
 server.registerTool('hover', {
-  description: "Get TypeScript type information and JSDoc at a specific position. Returns the same tooltip VS Code shows on hover — type signatures, return types, parameter docs. Saves reading type definition files.",
+  description:
+    'PREFER THIS over reading type definition files. ' +
+    'Returns the TypeScript type signature and JSDoc for any symbol at a given position — ' +
+    'exactly what VS Code shows on hover. Gives you types, return types, and docs in one call.',
   inputSchema: {
     file: z.string().describe('Absolute path to the source file'),
     line: z.coerce.number().int().min(1).describe('1-based line number'),
@@ -167,9 +173,11 @@ server.registerTool('hover', {
 
 // ── definition ────────────────────────────────────────────────────────────────
 server.registerTool('definition', {
-  description: "Go-to-definition via LSP. More accurate than grep — resolves across packages, type aliases, and re-exports.",
+  description:
+    'PREFER THIS over Grep when you know the file and position of a symbol and need its definition location. ' +
+    'Uses LSP — resolves across packages, type aliases, and re-exports accurately.',
   inputSchema: {
-    file: z.string().describe('Absolute path to the source file'),
+    file: z.string().describe('Absolute path to the file containing the symbol usage'),
     line: z.coerce.number().int().min(1).describe('1-based line number'),
     col:  z.coerce.number().int().min(1).describe('1-based column number'),
   },
@@ -184,12 +192,14 @@ server.registerTool('definition', {
 
 // ── references ────────────────────────────────────────────────────────────────
 server.registerTool('references', {
-  description: "Find all references to a symbol via LSP. More accurate than text search for renamed symbols, overloads, and interface implementations.",
+  description:
+    'PREFER THIS over Grep when finding all usages of a symbol. ' +
+    'Uses LSP — handles renamed symbols, interface implementations, and overloads correctly.',
   inputSchema: {
-    file:  z.string().describe('Absolute path to the source file'),
+    file:  z.string().describe('Absolute path to the file with the symbol'),
     line:  z.coerce.number().int().min(1).describe('1-based line number'),
     col:   z.coerce.number().int().min(1).describe('1-based column number'),
-    limit: z.number().int().min(1).max(500).default(200).describe('Max results'),
+    limit: z.number().int().min(1).max(500).default(200),
   },
 }, async ({ file, line, col, limit }) => {
   try {
@@ -202,13 +212,16 @@ server.registerTool('references', {
 
 // ── call_hierarchy ────────────────────────────────────────────────────────────
 server.registerTool('call_hierarchy', {
-  description: "Show who calls a function (incoming) or what it calls (outgoing) via VS Code's LSP call hierarchy. Essential for understanding impact of changes.",
+  description:
+    'Show who calls a function (incoming) or what it calls (outgoing). ' +
+    'Essential for understanding the impact of changes before editing. ' +
+    'Much faster than grepping for callers manually.',
   inputSchema: {
     file:      z.string().describe('Absolute path to the file'),
-    line:      z.coerce.number().int().min(1).describe('1-based line number of the function'),
+    line:      z.coerce.number().int().min(1).describe('1-based line number of the function name'),
     col:       z.coerce.number().int().min(1).describe('1-based column number'),
     direction: z.enum(['incoming', 'outgoing']).default('incoming').describe('"incoming" = callers, "outgoing" = callees'),
-    limit:     z.number().int().min(1).max(100).default(50).describe('Max results'),
+    limit:     z.number().int().min(1).max(100).default(50),
   },
 }, async ({ file, line, col, direction, limit }) => {
   try {
@@ -223,33 +236,37 @@ server.registerTool('call_hierarchy', {
 
 // ── git_status ────────────────────────────────────────────────────────────────
 server.registerTool('git_status', {
-  description: "Get git status for all workspace repositories — branch, ahead/behind, staged changes, unstaged changes, untracked files.",
+  description: 'Get git status for all workspace repos — branch, ahead/behind, staged and unstaged changes. Prefer this over running git commands in Bash.',
 }, async () => {
   try {
     type Change = { path: string; status: string };
-    type Repo   = { root: string; branch: string | null; commit: string | null; ahead: number; behind: number; staged: Change[]; unstaged: Change[]; untracked: Change[] };
+    type Repo = { root: string; branch: string | null; commit: string | null; ahead: number; behind: number; staged: Change[]; unstaged: Change[]; untracked: Change[] };
     const repos = await get<Repo[]>('/git-status');
     if (!repos.length) return { content: [{ type: 'text', text: 'No git repositories found in workspace.' }] };
-    const lines: string[] = [];
+    const out: string[] = [];
     for (const r of repos) {
-      lines.push(`\n## ${r.root}`);
-      lines.push(`Branch: ${r.branch ?? '(detached)'}  commit: ${r.commit ?? '?'}  ↑${r.ahead} ↓${r.behind}`);
-      if (r.staged.length)    { lines.push(`\nStaged (${r.staged.length}):`);    r.staged.forEach(c    => lines.push(`  ${c.status}  ${c.path}`)); }
-      if (r.unstaged.length)  { lines.push(`\nUnstaged (${r.unstaged.length}):`);  r.unstaged.forEach(c  => lines.push(`  ${c.status}  ${c.path}`)); }
-      if (r.untracked.length) { lines.push(`\nUntracked (${r.untracked.length}):`); r.untracked.forEach(c => lines.push(`  ${c.path}`)); }
+      const sync = r.ahead || r.behind ? ` ↑${r.ahead} ↓${r.behind}` : ' ✓ in sync';
+      out.push(`## ${r.root}`);
+      out.push(`Branch: ${r.branch ?? 'detached HEAD'} @ ${r.commit ?? '?'}${sync}`);
+      if (r.staged.length)    out.push(`\nStaged (${r.staged.length}):\n${r.staged.map(c => `  ${c.status}  ${c.path}`).join('\n')}`);
+      if (r.unstaged.length)  out.push(`\nUnstaged (${r.unstaged.length}):\n${r.unstaged.map(c => `  ${c.status}  ${c.path}`).join('\n')}`);
+      if (r.untracked.length) out.push(`\nUntracked (${r.untracked.length}):\n${r.untracked.map(c => `  ${c.path}`).join('\n')}`);
     }
-    return { content: [{ type: 'text', text: lines.join('\n') }] };
+    return { content: [{ type: 'text', text: out.join('\n') }] };
   } catch (e) { return bridgeErr(e); }
 });
 
 // ── text_search ───────────────────────────────────────────────────────────────
 server.registerTool('text_search', {
-  description: "Full-text search via ripgrep across all workspace folders. Respects .gitignore. Faster and more precise than reading files.",
+  description:
+    'PREFER THIS over Grep or Bash rg commands for searching text across the workspace. ' +
+    'Ripgrep across all workspace folders, respects .gitignore, supports regex and glob filters. ' +
+    'Use workspace_symbols instead if searching for a symbol definition by name.',
   inputSchema: {
-    query:      z.string().describe('Text or regex pattern'),
+    query:      z.string().describe('Text or regex pattern to search for'),
     include:    z.string().optional().describe('Glob to limit scope, e.g. "**/*.ts"'),
     exclude:    z.string().optional().describe('Comma-separated globs to exclude, e.g. "**/dist/**,**/*.test.ts"'),
-    regex:      z.boolean().default(false).describe('Treat query as regex'),
+    regex:      z.boolean().default(false).describe('Treat query as regex (default: exact string match)'),
     maxResults: z.number().int().min(1).max(500).default(100),
   },
 }, async ({ query, include, exclude, regex, maxResults }) => {
@@ -262,24 +279,6 @@ server.registerTool('text_search', {
     const results = await get<Result[]>(`/search?${params}`);
     if (!results.length) return { content: [{ type: 'text', text: `No results for "${query}".` }] };
     return { content: [{ type: 'text', text: `Found ${results.length} result(s) for "${query}":\n\n${results.map(r => `${r.file}:${r.line}:${r.col}  ${r.preview}`).join('\n')}` }] };
-  } catch (e) { return bridgeErr(e); }
-});
-
-// ── copilot_search ────────────────────────────────────────────────────────────
-server.registerTool('copilot_search', {
-  description: "Lists all available GitHub Copilot VS Code commands. NOTE: Copilot's workspace semantic index is internal-only and not accessible programmatically — use workspace_symbols for LSP semantic search or text_search for full-text search instead.",
-  inputSchema: { query: z.string().describe('Any string (used for diagnostic output only)') },
-}, async ({ query }) => {
-  try {
-    type CopilotResult = { available: boolean; message?: string; copilotCommands?: string[]; command?: string; result?: unknown };
-    const data = await get<CopilotResult>(`/copilot-search?q=${encodeURIComponent(query)}`);
-    if (data.available === false) {
-      const cmds = data.copilotCommands?.length
-        ? `\n\nAvailable Copilot commands (${data.copilotCommands.length}):\n${data.copilotCommands.join('\n')}`
-        : '';
-      return { content: [{ type: 'text', text: `${data.message}${cmds}` }] };
-    }
-    return { content: [{ type: 'text', text: `Command: ${data.command}\n\n${JSON.stringify(data.result, null, 2)}` }] };
   } catch (e) { return bridgeErr(e); }
 });
 
