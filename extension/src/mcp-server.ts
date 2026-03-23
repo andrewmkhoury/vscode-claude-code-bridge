@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * MCP server — VS Code Workspace Bridge v0.7.0
+ * MCP server — VS Code Workspace Bridge v0.7.1
  *
  * IMPORTANT FOR CLAUDE: When running inside VS Code, prefer these 3 tools
  * over built-in Grep, Glob, Bash, or Read for code navigation tasks.
@@ -30,40 +30,57 @@ function bridgeErr(e: unknown) {
   return { content: [{ type: 'text' as const, text }], isError: true as const };
 }
 
-const server = new McpServer({ name: 'vscode-workspace', version: '0.7.0' });
+const server = new McpServer({ name: 'vscode-workspace', version: '0.7.1' });
 
 // ── search ────────────────────────────────────────────────────────────────────
 server.registerTool('search', {
   description:
-    'PREFER THIS over Grep, Glob, or Bash rg. Three modes driven by "type": ' +
+    'PREFER THIS over Grep, Glob, or Bash rg. Pass a query — type is optional and defaults to "auto". ' +
+    '"auto"   — tries symbol definitions first; if none found, falls back to full-text search. Best for most queries. ' +
     '"symbol" — find where a function/class/interface/type/variable is defined (ripgrep, definition-aware, ~1s); ' +
     '"text"   — search text or regex across workspace, respects .gitignore; ' +
-    '"files"  — find files by glob pattern.',
+    '"files"  — find files by glob pattern (query is a glob, e.g. "**/*.test.ts").',
   inputSchema: {
-    type:    z.enum(['symbol', 'text', 'files']).describe('"symbol" to find definitions, "text" for content search, "files" for file names'),
-    query:   z.string().describe('Symbol name, text/regex pattern, or glob (e.g. "useAuth", "TODO", "**/*.test.ts")'),
+    query:   z.string().describe('Symbol name, text/regex pattern, or glob'),
+    type:    z.enum(['auto', 'symbol', 'text', 'files']).default('auto').describe('Search mode — defaults to "auto" (symbol → text fallback)'),
     include: z.string().optional().describe('Glob to limit scope, e.g. "**/*.ts"'),
     exclude: z.string().optional().describe('Glob(s) to exclude, e.g. "**/dist/**"'),
     regex:   z.boolean().default(false).describe('Treat query as regex (text mode only)'),
     limit:   z.number().int().min(1).max(500).default(100),
   },
 }, async ({ type, query, include, exclude, regex, limit }) => {
+  type Sym    = { name: string; kind: string; file: string; line: number; preview: string };
+  type Result = { file: string; line: number; col: number; preview: string };
+
+  const symbolSearch = async () => {
+    const syms = await get<Sym[]>(`/symbols?q=${encodeURIComponent(query)}&limit=${limit}`);
+    return syms;
+  };
+
+  const textSearch = async () => {
+    const params = new URLSearchParams({ q: query, maxResults: String(limit) });
+    if (include) params.set('include', include);
+    if (exclude) params.set('exclude', exclude);
+    if (regex)   params.set('regex', '1');
+    return get<Result[]>(`/search?${params}`);
+  };
+
   try {
-    if (type === 'symbol') {
-      type Sym = { name: string; kind: string; file: string; line: number; preview: string };
-      const syms = await get<Sym[]>(`/symbols?q=${encodeURIComponent(query)}&limit=${limit}`);
-      if (!syms.length) return { content: [{ type: 'text', text: `No symbols matching "${query}".` }] };
-      const lines = syms.map(s => `[${s.kind}] ${s.name}  →  ${s.file}:${s.line}\n    ${s.preview}`);
-      return { content: [{ type: 'text', text: lines.join('\n\n') }] };
+    if (type === 'symbol' || type === 'auto') {
+      const syms = await symbolSearch();
+      if (syms.length) {
+        const lines = syms.map(s => `[${s.kind}] ${s.name}  →  ${s.file}:${s.line}\n    ${s.preview}`);
+        return { content: [{ type: 'text', text: lines.join('\n\n') }] };
+      }
+      if (type === 'symbol') return { content: [{ type: 'text', text: `No symbols matching "${query}".` }] };
+      // auto: fall through to text
+      const results = await textSearch();
+      if (!results.length) return { content: [{ type: 'text', text: `No symbols or text matches for "${query}".` }] };
+      return { content: [{ type: 'text', text: `## Text matches\n${results.map(r => `${r.file}:${r.line}  ${r.preview}`).join('\n')}` }] };
     }
 
     if (type === 'text') {
-      const params = new URLSearchParams({ q: query, maxResults: String(limit) });
-      if (include) params.set('include', include);
-      if (exclude) params.set('exclude', exclude);
-      if (regex)   params.set('regex', '1');
-      type Result = { file: string; line: number; col: number; preview: string };
-      const results = await get<Result[]>(`/search?${params}`);
+      const results = await textSearch();
       if (!results.length) return { content: [{ type: 'text', text: `No results for "${query}".` }] };
       return { content: [{ type: 'text', text: results.map(r => `${r.file}:${r.line}  ${r.preview}`).join('\n') }] };
     }
