@@ -1,0 +1,91 @@
+{
+  "name": "claude-code-workspace",
+  "displayName": "Claude Code Workspace",
+  "description": "Exposes VS Code's workspace intelligence (symbols, diagnostics, references, definitions, search) to Claude Code via a local MCP bridge.",
+  "version": "0.1.0",
+  "publisher": "akhoury",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/akhoury/vscode-claude-code-bridge"
+  },
+  "bugs": {
+    "url": "https://github.com/akhoury/vscode-claude-code-bridge/issues"
+  },
+  "homepage": "https://github.com/akhoury/vscode-claude-code-bridge#readme",
+  "icon": "resources/icon.png",
+  "galleryBanner": {
+    "color": "#1e1e2e",
+    "theme": "dark"
+  },
+  "categories": ["AI", "Other"],
+  "keywords": ["claude", "claude-code", "mcp", "ai", "copilot", "workspace"],
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "activationEvents": ["onStartupFinished"],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "Claude Code Workspace",
+      "properties": {
+        "claudeCodeWorkspace.claudePath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Path to the `claude` CLI binary. Leave empty to auto-detect from `$PATH` and common install locations (e.g. `~/.local/bin/claude`)."
+        },
+        "claudeCodeWorkspace.port": {
+          "type": "number",
+          "default": 29837,
+          "minimum": 1024,
+          "maximum": 65535,
+          "description": "Local HTTP port the bridge server listens on. Must match the port configured in the MCP server."
+        },
+        "claudeCodeWorkspace.maxSymbols": {
+          "type": "number",
+          "default": 100,
+          "minimum": 1,
+          "maximum": 500,
+          "description": "Maximum number of symbols returned by a workspace symbol search."
+        },
+        "claudeCodeWorkspace.maxFiles": {
+          "type": "number",
+          "default": 200,
+          "minimum": 1,
+          "maximum": 1000,
+          "description": "Maximum number of files returned by a file search."
+        },
+        "claudeCodeWorkspace.maxSearchResults": {
+          "type": "number",
+          "default": 100,
+          "minimum": 1,
+          "maximum": 500,
+          "description": "Maximum number of results returned by a text search."
+        },
+        "claudeCodeWorkspace.maxReferences": {
+          "type": "number",
+          "default": 200,
+          "minimum": 1,
+          "maximum": 500,
+          "description": "Maximum number of reference locations returned per find-references call."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run bundle",
+    "bundle": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --minify",
+    "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --sourcemap",
+    "watch": "npm run build -- --watch",
+    "typecheck": "tsc --noEmit",
+    "package": "vsce package",
+    "publish": "vsce publish"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.0.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.4.0"
+  }
+}
