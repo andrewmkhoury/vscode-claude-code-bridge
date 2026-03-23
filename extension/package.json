@@ -3,7 +3,7 @@
   "displayName": "Claude Code Workspace",
   "description": "Exposes VS Code's workspace intelligence (symbols, diagnostics, references, definitions, search) to Claude Code via a local MCP bridge.",
   "version": "0.1.0",
-  "publisher": "akhoury",
+  "publisher": "andrewmkhoury",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -70,16 +70,45 @@
           "description": "Maximum number of reference locations returned per find-references call."
         }
       }
-    }
+    },
+    "commands": [
+      {
+        "command": "claudeCodeWorkspace.configure",
+        "title": "Claude Code Workspace: Configure Claude Code",
+        "shortTitle": "Configure Claude Code"
+      },
+      {
+        "command": "claudeCodeWorkspace.unconfigure",
+        "title": "Claude Code Workspace: Remove Claude Code Configuration",
+        "shortTitle": "Remove Claude Code Configuration"
+      }
+    ],
+    "chatParticipants": [
+      {
+        "id": "claude-code-workspace.claude",
+        "fullName": "Claude Code",
+        "name": "claude",
+        "description": "Ask Claude Code anything about your workspace",
+        "isSticky": true
+      }
+    ]
   },
   "scripts": {
     "vscode:prepublish": "npm run bundle",
-    "bundle": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --minify",
-    "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --sourcemap",
+    "bundle": "npm run bundle:ext && npm run bundle:mcp",
+    "bundle:ext": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --minify",
+    "bundle:mcp": "esbuild src/mcp-server.ts --bundle --outfile=dist/mcp-server.mjs --format=esm --platform=node --banner:js='#!/usr/bin/env node' --minify",
+    "build": "npm run build:ext && npm run build:mcp",
+    "build:ext": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --sourcemap",
+    "build:mcp": "esbuild src/mcp-server.ts --bundle --outfile=dist/mcp-server.mjs --format=esm --platform=node --banner:js='#!/usr/bin/env node' --sourcemap",
     "watch": "npm run build -- --watch",
     "typecheck": "tsc --noEmit",
     "package": "vsce package",
     "publish": "vsce publish"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.6.1",
+    "zod": "^3.21.4"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

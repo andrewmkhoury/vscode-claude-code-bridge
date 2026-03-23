@@ -1,134 +1,127 @@
-# vscode-claude-code-bridge
+# Claude Code Workspace Bridge
 
-A VS Code extension + companion MCP server that expose VS Code's workspace intelligence to [Claude Code](https://claude.ai/code).
-
-Claude Code gains access to your live LSP index — symbols, diagnostics, go-to-definition, find-all-references, and full-text search — without re-indexing the codebase itself.
+Gives [Claude Code](https://claude.ai/claude-code) full access to VS Code's workspace intelligence — live LSP symbols, diagnostics, go-to-definition, find-all-references, and text search — via a local MCP bridge that **installs and configures itself automatically**.
 
 ## How it works
 
 ```
-Claude Code CLI
-    └── MCP server (mcp-server-vscode)
-            └── HTTP bridge (port 29837)
-                    └── VS Code extension (Claude Code Workspace)
-                            ├── vscode.executeWorkspaceSymbolProvider
-                            ├── vscode.languages.getDiagnostics
-                            ├── vscode.executeDefinitionProvider
-                            ├── vscode.executeReferenceProvider
-                            ├── vscode.workspace.findTextInFiles
-                            └── vscode.workspace.findFiles
+Claude Code CLI  ←─ MCP (stdio) ─→  mcp-server.mjs  ←─ HTTP :29837 ─→  VS Code Extension
+                                    (auto-installed                       (HTTP bridge server)
+                                     to ~/.claude-code-workspace/)
 ```
 
-## Installation
+The VS Code extension bundles the MCP server, copies it to a stable path on activation, and auto-writes the entry into `~/.claude.json`. No npm installs, no manual JSON editing.
 
-### 1. Install the VS Code extension
+## Install
 
-Install **Claude Code Workspace** from the VS Code Marketplace, or download the `.vsix` from the [releases page](https://github.com/andrewmkhoury/vscode-claude-code-bridge/releases) and install with:
+### macOS / Linux
 
-```sh
+```bash
+curl -fsSL https://raw.githubusercontent.com/andrewmkhoury/vscode-claude-code-bridge/main/install.sh | sh
+```
+
+### Windows (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/andrewmkhoury/vscode-claude-code-bridge/main/install.ps1 | iex
+```
+
+### VS Code Marketplace
+
+Search **"Claude Code Workspace"** in the Extensions panel, or:
+
+```bash
+code --install-extension andrewmkhoury.claude-code-workspace
+# or for Cursor:
+cursor --install-extension andrewmkhoury.claude-code-workspace
+```
+
+### Manual (.vsix)
+
+Download the latest `.vsix` from [Releases](https://github.com/andrewmkhoury/vscode-claude-code-bridge/releases):
+
+```bash
 code --install-extension claude-code-workspace-*.vsix
 ```
 
-### 2. Install the MCP server
+## First-time setup
 
-```sh
-npm install -g mcp-server-vscode
-```
+After installing, restart VS Code. A notification appears:
 
-### 3. Register the MCP server with Claude Code
+> **Claude Code Workspace: Configure Claude Code to use VS Code's workspace intelligence?**
 
-Add to your `~/.claude.json`:
+Click **Set Up** — done. Restart Claude Code and the bridge is live.
 
-```json
-{
-  "mcpServers": {
-    "vscode-workspace": {
-      "command": "mcp-server-vscode"
-    }
-  }
-}
-```
-
-Or if you use a non-default port:
-
-```json
-{
-  "mcpServers": {
-    "vscode-workspace": {
-      "command": "mcp-server-vscode",
-      "env": { "VSCODE_BRIDGE_PORT": "29837" }
-    }
-  }
-}
-```
-
-### 4. Open VS Code and verify
-
-After restarting Claude Code, run:
+You can also trigger this anytime from the Command Palette (`Cmd+Shift+P`):
 
 ```
-check bridge_health
+> Claude Code Workspace: Configure Claude Code
 ```
 
-You should see the workspace folders VS Code currently has open.
+A status bar indicator `$(plug) Claude Bridge` confirms the bridge is running.
 
-## Available MCP tools
+## MCP Tools
 
 | Tool | Description |
-|---|---|
+|------|-------------|
 | `bridge_health` | VS Code status, open workspace folders, active file |
-| `workspace_symbols` | LSP workspace symbol search by name/prefix |
+| `workspace_symbols` | LSP symbol search by name/prefix — classes, functions, interfaces |
 | `find_files` | Glob file search respecting `.gitignore` |
-| `active_editor` | Current file, selected text, open tabs |
-| `diagnostics` | Errors and warnings from the Problems panel |
-| `definition` | Go-to-definition via LSP |
-| `references` | Find all references via LSP |
-| `text_search` | Full-text search with regex support |
+| `active_editor` | Currently open file, selected text, all open tabs |
+| `diagnostics` | Errors and warnings from the Problems panel (TypeScript, ESLint, etc.) |
+| `definition` | Go-to-definition via LSP — resolves across packages and re-exports |
+| `references` | Find all references via LSP — accurate across renames and overloads |
+| `text_search` | Full-text / regex search respecting `.gitignore` |
 
-## Configuration
+## Settings
 
-All settings are available in VS Code under **Settings → Claude Code Workspace**:
+**Settings → Extensions → Claude Code Workspace**
 
 | Setting | Default | Description |
-|---|---|---|
-| `claudeCodeWorkspace.claudePath` | *(auto)* | Path to the `claude` CLI. Leave empty to auto-detect. |
-| `claudeCodeWorkspace.port` | `29837` | HTTP bridge port. Must match `VSCODE_BRIDGE_PORT` in MCP config. |
-| `claudeCodeWorkspace.maxSymbols` | `100` | Max symbols returned per search. |
-| `claudeCodeWorkspace.maxFiles` | `200` | Max files returned per search. |
-| `claudeCodeWorkspace.maxSearchResults` | `100` | Max text search results. |
-| `claudeCodeWorkspace.maxReferences` | `200` | Max reference locations. |
+|---------|---------|-------------|
+| `claudeCodeWorkspace.claudePath` | *(auto)* | Path to `claude` CLI. Empty = auto-detect from `$PATH` and common locations. |
+| `claudeCodeWorkspace.port` | `29837` | Bridge HTTP port. |
+| `claudeCodeWorkspace.maxSymbols` | `100` | Max symbols per search (up to 500). |
+| `claudeCodeWorkspace.maxFiles` | `200` | Max files per glob (up to 1000). |
+| `claudeCodeWorkspace.maxSearchResults` | `100` | Max text search results (up to 500). |
+| `claudeCodeWorkspace.maxReferences` | `200` | Max reference locations (up to 500). |
 
-## @claude chat participant
+## @claude Chat Participant
 
-The extension also registers a `@claude` participant in VS Code Chat that forwards messages directly to the Claude Code CLI. Type `@claude <your question>` in any VS Code chat panel.
+Type `@claude` in VS Code Chat to talk to Claude Code directly inside VS Code. Requires the Claude Code CLI to be installed.
+
+## Supported platforms
+
+Works with **VS Code** and **Cursor** on:
+
+| Platform | Status |
+|----------|--------|
+| macOS (Apple Silicon) | ✅ |
+| macOS (Intel) | ✅ |
+| Linux x64 | ✅ |
+| Linux arm64 | ✅ |
+| Windows x64 | ✅ |
 
 ## Development
 
-```sh
+```bash
 git clone https://github.com/andrewmkhoury/vscode-claude-code-bridge
-cd vscode-claude-code-bridge
-
-# Build the extension
-cd extension && npm install && npm run build
-
-# Build the MCP server
-cd ../mcp-server && npm install && npm run build
+cd vscode-claude-code-bridge/extension
+npm install && npm run build
 ```
 
-To run the extension locally, open the `extension/` folder in VS Code and press **F5**.
-
-## Repository structure
+Press **F5** in VS Code to launch the extension in a development host.
 
 ```
 vscode-claude-code-bridge/
-├── extension/          VS Code extension (TypeScript, esbuild)
+├── extension/          VS Code extension (TypeScript + esbuild)
 │   └── src/
-│       └── extension.ts
-└── mcp-server/         MCP server npm package (TypeScript)
-    └── src/
-        └── index.ts
+│       ├── extension.ts    HTTP bridge + auto-configure logic
+│       └── mcp-server.ts   MCP server (bundled into dist/mcp-server.mjs)
+└── mcp-server/         Standalone MCP server npm package
+    └── src/index.ts
 ```
 
 ## License
 
-Apache-2.0
+[Apache 2.0](LICENSE) — Copyright 2026 Andrew Khoury
