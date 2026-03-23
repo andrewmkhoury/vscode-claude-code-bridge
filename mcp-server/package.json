@@ -2,17 +2,17 @@
   "name": "mcp-server-vscode",
   "version": "0.1.0",
   "description": "MCP server that exposes VS Code workspace intelligence (symbols, diagnostics, references, definitions, text search) to Claude Code via the Claude Code Workspace extension.",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "author": "akhoury",
   "repository": {
     "type": "git",
-    "url": "https://github.com/akhoury/vscode-claude-code-bridge",
+    "url": "https://github.com/andrewmkhoury/vscode-claude-code-bridge",
     "directory": "mcp-server"
   },
   "bugs": {
-    "url": "https://github.com/akhoury/vscode-claude-code-bridge/issues"
+    "url": "https://github.com/andrewmkhoury/vscode-claude-code-bridge/issues"
   },
-  "homepage": "https://github.com/akhoury/vscode-claude-code-bridge#readme",
+  "homepage": "https://github.com/andrewmkhoury/vscode-claude-code-bridge#readme",
   "keywords": ["mcp", "claude", "claude-code", "vscode", "workspace", "lsp"],
   "type": "module",
   "bin": {

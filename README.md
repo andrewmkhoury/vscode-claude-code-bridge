@@ -23,7 +23,7 @@ Claude Code CLI
 
 ### 1. Install the VS Code extension
 
-Install **Claude Code Workspace** from the VS Code Marketplace, or download the `.vsix` from the [releases page](https://github.com/akhoury/vscode-claude-code-bridge/releases) and install with:
+Install **Claude Code Workspace** from the VS Code Marketplace, or download the `.vsix` from the [releases page](https://github.com/andrewmkhoury/vscode-claude-code-bridge/releases) and install with:
 
 ```sh
 code --install-extension claude-code-workspace-*.vsix
@@ -105,7 +105,7 @@ The extension also registers a `@claude` participant in VS Code Chat that forwar
 ## Development
 
 ```sh
-git clone https://github.com/akhoury/vscode-claude-code-bridge
+git clone https://github.com/andrewmkhoury/vscode-claude-code-bridge
 cd vscode-claude-code-bridge
 
 # Build the extension
@@ -131,4 +131,4 @@ vscode-claude-code-bridge/
 
 ## License
 
-MIT
+Apache-2.0

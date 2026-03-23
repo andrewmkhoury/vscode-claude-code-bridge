@@ -4,15 +4,15 @@
   "description": "Exposes VS Code's workspace intelligence (symbols, diagnostics, references, definitions, search) to Claude Code via a local MCP bridge.",
   "version": "0.1.0",
   "publisher": "akhoury",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/akhoury/vscode-claude-code-bridge"
+    "url": "https://github.com/andrewmkhoury/vscode-claude-code-bridge"
   },
   "bugs": {
-    "url": "https://github.com/akhoury/vscode-claude-code-bridge/issues"
+    "url": "https://github.com/andrewmkhoury/vscode-claude-code-bridge/issues"
   },
-  "homepage": "https://github.com/akhoury/vscode-claude-code-bridge#readme",
+  "homepage": "https://github.com/andrewmkhoury/vscode-claude-code-bridge#readme",
   "icon": "resources/icon.png",
   "galleryBanner": {
     "color": "#1e1e2e",
